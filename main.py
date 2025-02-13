@@ -49,22 +49,28 @@ def get_korean_stock_news(symbol: str):
         link = article.select_one("a.news_tit").get("href")
         description = article.select_one(".news_dsc").text if article.select_one(".news_dsc") else "No description"
 
-        # 발행일, 고유 ID 가져오기
+        # 개별 기사 페이지 요청
         article_response = requests.get(link, headers=headers)
         article_soup = BeautifulSoup(article_response.text, "html.parser")
+
+        # guid 역할 해줄 gdid 가져오기
+        gdid_element = article_soup.find("meta", {"property": "nv:news:article:gid"})
+        gdid = gdid_element["content"] if gdid_element else link
 
         # 발행일 가져오기
         pub_date_element = article_soup.find("meta", {"property": "article:published_time"})
         pub_date_raw = pub_date_element["content"] if pub_date_element else None
 
         if pub_date_raw:
+            # UTC 형식으로 변환
             pub_date_kr = datetime.strptime(pub_date_raw, "%Y-%m-%dT%H:%M:%S%z")
-            pub_date = pub_date_kr.astimezone(pytz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            pub_date = pub_date_kr.astimezone(pytz.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
         else:
             pub_date = "No Date information"
 
         news_list.append({
             "description": description,
+            "guid": gdid,
             "link": link,
             "pubDate": pub_date,
             "title": title
