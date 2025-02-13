@@ -1,8 +1,10 @@
 import requests
 import os
+import pytz
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from bs4 import BeautifulSoup
+from datetime import datetime
 
 app = FastAPI()
 
@@ -44,16 +46,27 @@ def get_korean_stock_news(symbol: str):
 
     for article in articles[:20]:
         title = article.select_one("a.news_tit").text
-        # pub_date = article.select_one(".info").text if article.select_one(".info") else "No Date information" # pubDate 가져오기
         link = article.select_one("a.news_tit").get("href")
-        # guid = link # guid 가져오기
         description = article.select_one(".news_dsc").text if article.select_one(".news_dsc") else "No description"
+
+        # 발행일, 고유 ID 가져오기
+        article_response = requests.get(link, headers=headers)
+        article_soup = BeautifulSoup(article_response.text, "html.parser")
+
+        # 발행일 가져오기
+        pub_date_element = article_soup.find("meta", {"property": "article:published_time"})
+        pub_date_raw = pub_date_element["content"] if pub_date_element else None
+
+        if pub_date_raw:
+            pub_date_kr = datetime.strptime(pub_date_raw, "%Y-%m-%dT%H:%M:%S%z")
+            pub_date = pub_date_kr.astimezone(pytz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            pub_date = "No Date information"
 
         news_list.append({
             "description": description,
-            # "guid": guid,
             "link": link,
-            # "pubDate": pub_date,
+            "pubDate": pub_date,
             "title": title
         })
 
