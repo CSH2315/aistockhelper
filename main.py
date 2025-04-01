@@ -1,20 +1,86 @@
-import requests
 import os
+import logging
 import pytz
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from bs4 import BeautifulSoup
 from datetime import datetime
 
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+
 app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+@app.get("/")
+def root_test():
+    return {"msg": "Hello"}
+
 
 load_dotenv()
+HUGGINGFACE_API_KEY = os.environ.get('HUGGINGFACE-STOCK-API-KEY')
 YAHOO_API_KEY = os.environ.get('YAHOO_API_KEY')
 YAHOO_API_HOST = "yahoo-finance15.p.rapidapi.com"
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the FastAPI API"}
+
+# 감정 분석 요청 바디 스키마 정의
+class NewsText(BaseModel):
+    news_text: str
+
+
+# 영어 감정 분석
+def analyze_sentiment_english(news_text):
+    api_url = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+    headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+    data = {"inputs": news_text}
+
+    response = requests.post(api_url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        sentiment_data = response.json()
+        labels = {"negative": "negative", "neutral": "neutral", "positive": "positive"}
+
+        if not sentiment_data or not sentiment_data[0]:
+            return "Unknown"
+
+        # 가장 높은 점수를 받은 감정 선택
+        best_label = max(sentiment_data[0], key=lambda x: x["score"])["label"]
+        sentiment_label = labels.get(best_label, "Unknown")
+        return sentiment_label
+    else:
+        return "Unknown"
+
+
+def analyze_sentiment_korean(news_text):
+    api_url = "https://api-inference.huggingface.co/models/snunlp/KR-FinBert-SC"
+    headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+    data = {"inputs": news_text}
+
+    response = requests.post(api_url, headers=headers, json=data)
+
+    if response.status_code != 200:
+        return "Unknown"
+
+    content_type = response.headers.get("Content-Type", "")
+    if "application/json" not in content_type:
+        return "Unknown"
+
+    try:
+        sentiment_data = response.json()
+    except Exception as e:
+        logger.warning("JSON parse error: %s", e)
+        return "Unknown"
+
+    if not sentiment_data or not sentiment_data[0]:
+        return "Unknown"
+
+    # max() 로 label 고르기
+    best_label = max(sentiment_data[0], key=lambda x: x["score"])["label"]
+    label_map = {"positive": "positive", "negative": "negative", "neutral": "neutral"}
+    return label_map.get(best_label, "Unknown")
+
 
 # 해외주식: Yahoo Finance API 사용
 @app.get("/news/global/{symbol}")
@@ -27,9 +93,33 @@ def get_global_stock_news(symbol: str):
     response = requests.get(url, headers=headers)
 
     if response.status_code == 200:
+        sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
         news_data = response.json()
-        return news_data
-    return {"error: Failed to fetch"}
+
+        # 응답 데이터가 예상한 구조인지 확인
+        if "body" in news_data and isinstance(news_data["body"], list) and len(news_data["body"]) > 0:
+            for article in news_data["body"]:
+                description = article.get("description", "No description")
+
+                # 감정 분석 수행
+                sentiment = analyze_sentiment_english(description)
+                if sentiment not in sentiment_counts:
+                    sentiment_counts[sentiment] = 0
+                sentiment_counts[sentiment] += 1
+
+                # 감정 분석 결과를 뉴스 항목에 추가
+                article["sentiment"] = sentiment
+
+            return {
+                "symbol": symbol,
+                "sentiment_counts": sentiment_counts,
+                "news": news_data["body"]
+            }
+
+        else:
+            return {"error": "No news data available"}
+
+    return {"error": "Failed to fetch"}
 
 
 # 국내주식: 네이버 웹 크롤링
@@ -43,6 +133,8 @@ def get_korean_stock_news(symbol: str):
 
     news_list = []
     articles = soup.select("div.news_area")
+
+    sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
 
     for article in articles[:20]:
         title = article.select_one("a.news_tit").text
@@ -62,18 +154,30 @@ def get_korean_stock_news(symbol: str):
         pub_date_raw = pub_date_element["content"] if pub_date_element else None
 
         if pub_date_raw:
-            # UTC 형식으로 변환
-            pub_date_kr = datetime.strptime(pub_date_raw, "%Y-%m-%dT%H:%M:%S%z")
-            pub_date = pub_date_kr.astimezone(pytz.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+            if pub_date_raw.endswith("Z"):
+                pub_date_raw = pub_date_raw.replace("Z", "+00:00")
+            try:
+                pub_date_kr = datetime.fromisoformat(pub_date_raw)
+            except ValueError:
+                # 날짜 파싱 실패 시 처리
+                pub_date_kr = "Invalid date format"
         else:
-            pub_date = "No Date information"
+            pub_date_kr = "No Date information"
+
+        # 감정 분석
+        sentiment = analyze_sentiment_korean(description)
+        sentiment_counts[sentiment] += 1
 
         news_list.append({
             "description": description,
             "guid": gdid,
             "link": link,
-            "pubDate": pub_date,
-            "title": title
+            "pubDate": pub_date_kr,
+            "title": title,
+            "sentiment": sentiment
         })
 
     return {"symbol": symbol, "news": news_list}
+
+
+
